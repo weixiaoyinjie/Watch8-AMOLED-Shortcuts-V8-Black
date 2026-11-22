@@ -1,0 +1,84 @@
+name: Build Watch8 V8 from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract source ZIP uploaded to GitHub
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="Watch8_AMOLED_Shortcuts_V8_Black_OneUpload.zip"
+          if [[ ! -f "$archive" ]]; then
+            mapfile -t archives < <(find . -maxdepth 1 -type f -iname '*.zip' -printf '%f\n')
+            if [[ ${#archives[@]} -ne 1 ]]; then
+              echo "::error::Please upload Watch8_AMOLED_Shortcuts_V8_Black_OneUpload.zip to the repository root (or leave exactly one ZIP in the root)."
+              printf 'Found ZIPs: %s\n' "${archives[*]}"
+              exit 1
+            fi
+            archive="${archives[0]}"
+          fi
+          mkdir -p project
+          unzip -q "$archive" -d project
+          if [[ ! -f project/settings.gradle.kts ]]; then
+            echo "::error::Source ZIP must contain settings.gradle.kts at its root."
+            exit 1
+          fi
+          echo "Extracted: $archive"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android API 35
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Verify watch face source
+        working-directory: project
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          xml_path = Path('app/src/main/res/raw/watchface.xml')
+          root = ET.parse(xml_path).getroot()
+          assert root.tag == 'WatchFace'
+          assert len(root.findall('.//ComplicationSlot')) == 8
+          assert not root.findall('./Scene/PartImage'), 'Static sample tiles still overlap shortcut icons'
+          assert root.find('.//Scene').get('backgroundColor') == '#ff000000'
+          ET.parse('app/src/main/AndroidManifest.xml')
+          print('Watch face checks passed')
+          PY
+
+      - name: Build APK
+        working-directory: project
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Watch8-AMOLED-V8-APK
+          path: project/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
